@@ -1,4 +1,3 @@
-# orchestrator/ingestor.py
 import cv2
 import zmq
 import json
@@ -38,6 +37,7 @@ class Ingestor:
         self.phase_socket = None
         self.current_phase = None
         self.frame_count = 0
+        self.last_frame_time = time.time()
 
     def _init_video_capture(self, src):
         self.logger.info("Initializing video capture...")
@@ -91,7 +91,15 @@ class Ingestor:
                     self.logger.warning("📴 End of stream or read error.")
                     break
 
+                current_time = time.time()
+                time_diff = current_time - self.last_frame_time
+
+                # Ensure 60 FPS (16.67ms per frame)
+                if time_diff < 1/60:  # If the frame was processed too fast, skip this one
+                    continue
+
                 self.frame_count += 1
+                self.last_frame_time = current_time  # Update the last frame time
 
                 if self.frame_count == 1 or self.frame_count % self.heartbeat_interval == 0:
                     self.logger.debug(f"💓 Heartbeat check at frame {self.frame_count}")
