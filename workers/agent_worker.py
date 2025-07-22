@@ -2,6 +2,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 import importlib.util
+import time
+
 import cv2
 import torch
 import torch.nn.functional as F
@@ -119,8 +121,11 @@ class AgentWorker:
                     torch.cuda.ipc_collect()
                     log_gpu_usage("[Cleanup] ")
 
+                # Optional: Add a slight delay to give GPU time to stabilize
+                time.sleep(0.05)
+
             except zmq.Again:
-                continue
+                continue  # timeout waiting for frame
             except Exception as e:
                 self.logger.exception(f"Agent worker error: {e}")
 
