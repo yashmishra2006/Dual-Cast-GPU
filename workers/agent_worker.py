@@ -77,6 +77,9 @@ class AgentWorker:
         console.log(f"[green]Sending output to tcp://localhost:{output_port}[/green]")
 
     def infer(self, frame):
+        # Resize frame to 224x224 for ResNet's default input size (faster)
+        frame = cv2.resize(frame, (224, 224))  # Resize to 224x224 for ResNet
+
         image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         image = self.transform(image).unsqueeze(0).to(self.device)
         if self.device.type == 'cuda':
@@ -98,9 +101,7 @@ class AgentWorker:
                 header, frame = recv_frame(self.input_socket)
                 frame_id += 1
 
-                # Resize to YOLO's default input size (640x640)
-                frame = cv2.resize(frame, (640, 640))
-
+                # Process the frame and perform inference
                 agent, conf = self.infer(frame)
 
                 result = {
