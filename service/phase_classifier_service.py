@@ -1,4 +1,3 @@
-# service/phase_classifier_service.py
 import zmq
 import torch
 import torch.nn.functional as F
@@ -16,6 +15,7 @@ from prometheus_client import Counter, Histogram, generate_latest
 from pathlib import Path
 from typing import List
 from rich.console import Console
+import GPUtil
 
 console = Console()
 
@@ -24,6 +24,17 @@ phase_requests_total = Counter('phase_requests_total', 'Total phase classificati
 inference_seconds = Histogram('inference_seconds', 'Time spent on inference')
 
 PHASE_CLASSES = ["AGENT_PHASE", "BUY_PHASE", "GAME_PHASE"]
+
+def log_gpu_usage(prefix=""):
+    """Logs the GPU memory usage."""
+    try:
+        gpus = GPUtil.getGPUs()
+        if gpus:
+            used = gpus[0].memoryUsed
+            total = gpus[0].memoryTotal
+            console.log(f"{prefix}GPU Usage: {used:.1f} / {total:.1f} MB")
+    except Exception as e:
+        console.warning(f"GPU usage logging failed: {e}")
 
 # ----------------- PHASE CLASSIFIER ----------------- #
 class PhaseClassifier:
@@ -99,6 +110,7 @@ class PhaseClassifierService:
 
     def serve(self):
         console.log("[bold green]✅ Phase Classifier Service is now running[/bold green]")
+        frame_id = 0
         while self.running:
             try:
                 if self.socket.poll(1000):
@@ -114,6 +126,14 @@ class PhaseClassifierService:
                     phase, conf = self.classifier.infer(frames)
                     self.socket.send_string(json.dumps({"phase": phase, "confidence": conf}))
                     phase_requests_total.inc()
+
+                    # GPU Memory Cleanup every 500 frames
+                    frame_id += 1
+                    if frame_id % 500 == 0 and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+                        log_gpu_usage("[Cleanup] ")
+
                 else:
                     time.sleep(0.1)
 

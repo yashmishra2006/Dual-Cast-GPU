@@ -1,19 +1,19 @@
-# workers/game_worker.py
 import logging
 from datetime import datetime
 from pathlib import Path
 import sys
 import time
 import importlib.util
-
 import cv2
 import numpy as np
 import zmq
 from ultralytics import YOLO
 from rich.logging import RichHandler
 from rich.console import Console
+import GPUtil
+import torch
 
-# Setup rich logger
+# Setup rich logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
@@ -23,24 +23,32 @@ logging.basicConfig(
 logger = logging.getLogger("GameWorker")
 console = Console()
 
-# Direct import from file paths
-spec_device = Path("core/device.py").resolve()
-spec_zmq = Path("core/zmq_utils.py").resolve()
-
+# === Dynamically import core modules ===
 def import_from_path(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
-device_module = import_from_path("device", spec_device)
-zmq_utils = import_from_path("zmq_utils", spec_zmq)
+device_module = import_from_path("device", Path("core/device.py").resolve())
+zmq_utils = import_from_path("zmq_utils", Path("core/zmq_utils.py").resolve())
 
 DeviceManager = device_module.DeviceManager
 recv_frame = zmq_utils.recv_frame
 send_frame = zmq_utils.send_frame
 
 EVENT_CLASSES = ["KILL_FEED", "SPIKE_PLANT", "SPIKE_DEFUSE", "ROUND_END"]
+
+def log_gpu_usage(prefix=""):
+    """Logs the GPU memory usage."""
+    try:
+        gpus = GPUtil.getGPUs()
+        if gpus:
+            used = gpus[0].memoryUsed
+            total = gpus[0].memoryTotal
+            logger.info(f"{prefix}GPU Usage: {used:.1f} / {total:.1f} MB")
+    except Exception as e:
+        logger.warning(f"GPU usage logging failed: {e}")
 
 class GameWorker:
     def __init__(self, input_port=5557, output_port=5561):
@@ -113,9 +121,15 @@ class GameWorker:
 
     def run(self):
         self.logger.info("🎮 Game Phase Worker started")
+        frame_id = 0
         while True:
             try:
                 header, frame = recv_frame(self.input_socket)
+                frame_id += 1
+
+                # Resize to YOLO's default input size (640x640)
+                frame = cv2.resize(frame, (640, 640))
+
                 events = self.detect_events(frame)
                 result = {
                     "frame_id": header["frame_id"],
@@ -125,10 +139,17 @@ class GameWorker:
                     "input_timestamp": header["timestamp"]
                 }
                 send_frame(self.output_socket, frame, result)
+
+                # GPU Memory Cleanup after every 500 frames
+                if frame_id % 500 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                    log_gpu_usage("[Cleanup] ")
+
                 self.logger.info(f"📦 Frame {header['frame_id']}: {len(events)} event(s)")
 
             except zmq.Again:
-                time.sleep(0.1)
+                time.sleep(0.1)  # wait briefly
             except Exception as e:
                 self.logger.exception(f"Game worker error: {e}")
 
