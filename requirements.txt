@@ -1,0 +1,25 @@
+# Core dependencies
+torch>=2.0
+torchvision>=0.15
+numpy
+opencv-python
+Pillow
+
+# YOLOv8 support (via Ultralytics)
+ultralytics>=8.0.20
+
+# ZMQ for inter-process communication
+pyzmq
+
+# Prometheus metrics (optional but used in original services)
+prometheus-client
+
+# FastAPI + Uvicorn for phase classifier service
+fastapi
+uvicorn[standard]
+
+# Logging and pretty console output (optional)
+rich
+
+# Optional system-level for memory info (used in game phase metrics)
+psutil
