@@ -1,3 +1,4 @@
+# ingestor.py
 import cv2
 import zmq
 import json
@@ -6,10 +7,10 @@ import logging
 from datetime import datetime
 from pathlib import Path
 import importlib.util
+import gc
 
-# Dynamic import
-spec_zmq = Path("core/zmq_utils.py").resolve()
-spec = importlib.util.spec_from_file_location("zmq_utils", spec_zmq)
+# Load zmq_utils
+spec = importlib.util.spec_from_file_location("zmq_utils", Path("core/zmq_utils.py"))
 zmq_utils = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(zmq_utils)
 send_frame = zmq_utils.send_frame
@@ -22,14 +23,12 @@ PHASE_PORTS = {
 
 class Ingestor:
     def __init__(self):
-        logging.basicConfig(
-            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-            level=logging.INFO
-        )
+        logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger("Ingestor")
 
-        self.source = input("🎥 Enter video source (0 for webcam, or file path): ")
-        self.heartbeat_interval = int(input("🔁 Enter heartbeat interval (in frames): "))
+        self.source = input("🎥 Video source (0 for webcam or path): ")
+        self.heartbeat_interval = int(input("🔁 Heartbeat interval (frames): "))
+        self.skip_rate = 3  # Send 1 in 3 frames
 
         self.cap = self._init_video_capture(self.source)
         self.context = zmq.Context()
@@ -37,21 +36,14 @@ class Ingestor:
         self.phase_socket = None
         self.current_phase = None
         self.frame_count = 0
-        self.last_frame_time = time.time()
 
     def _init_video_capture(self, src):
-        self.logger.info("Initializing video capture...")
         cap = cv2.VideoCapture(int(src)) if src.isdigit() else cv2.VideoCapture(src)
-
         if not cap.isOpened():
-            self.logger.error(f"❌ Failed to open video source: {src}")
-            exit(1)
-
-        self.logger.info(f"✅ Video source opened: {src}")
+            raise RuntimeError(f"❌ Could not open source: {src}")
         return cap
 
     def _init_classifier_socket(self):
-        self.logger.info("Setting up classifier socket...")
         sock = self.context.socket(zmq.REQ)
         sock.RCVTIMEO = 2000
         sock.connect("tcp://localhost:5554")
@@ -65,76 +57,58 @@ class Ingestor:
         try:
             reply = self.classifier_socket.recv_string()
             result = json.loads(reply)
-            phase = result.get("phase")
-            confidence = result.get("confidence")
-            self.logger.info(f"🧠 Phase classified as '{phase}' (confidence: {confidence:.2f})")
-            return phase, confidence
+            return result.get("phase"), result.get("confidence", 0.0)
         except zmq.Again:
-            self.logger.warning("⚠️ Classifier did not respond in time.")
+            self.logger.warning("⚠️ Classifier timeout")
             return self.current_phase, 0.0
 
     def _switch_phase(self, new_phase):
         if self.phase_socket:
             self.phase_socket.close()
-            self.logger.info("🔌 Closed previous phase socket.")
         self.phase_socket = self.context.socket(zmq.PUSH)
         self.phase_socket.connect(f"tcp://localhost:{PHASE_PORTS[new_phase]}")
-        self.logger.info(f"🔀 Switched to phase: {new_phase}")
         self.current_phase = new_phase
 
     def run(self):
         self.logger.info("🚀 Ingestor started")
-        while True:
-            try:
+        try:
+            while True:
                 ret, frame = self.cap.read()
                 if not ret:
                     self.logger.warning("📴 End of stream or read error.")
                     break
 
-                current_time = time.time()
-                time_diff = current_time - self.last_frame_time
-
-                # Ensure 60 FPS (16.67ms per frame)
-                if time_diff < 1/60:  # If the frame was processed too fast, skip this one
-                    continue
-
                 self.frame_count += 1
-                self.last_frame_time = current_time  # Update the last frame time
 
                 if self.frame_count == 1 or self.frame_count % self.heartbeat_interval == 0:
-                    self.logger.debug(f"💓 Heartbeat check at frame {self.frame_count}")
                     phase, conf = self._classify_phase(frame)
                     if phase and phase != self.current_phase:
                         self._switch_phase(phase)
 
-                if self.phase_socket:
+                # Send only 1 in every 3 frames
+                if self.phase_socket and self.frame_count % self.skip_rate == 0:
                     header = {
                         "frame_id": self.frame_count,
                         "timestamp": datetime.now().isoformat(),
                         "shape": list(frame.shape)
                     }
                     send_frame(self.phase_socket, frame, header)
-                    self.logger.info(f"📤 Sent frame {self.frame_count} to {self.current_phase}")
+                    self.logger.info(f"📤 Frame {self.frame_count} sent to {self.current_phase}")
 
-            except KeyboardInterrupt:
-                self.logger.info("⛔ Interrupted by user.")
-                break
-            except Exception as e:
-                self.logger.exception(f"💥 Ingestor error: {e}")
-                continue
-
-        self.cleanup()
+        except KeyboardInterrupt:
+            self.logger.info("⛔ Interrupted.")
+        finally:
+            self.cleanup()
 
     def cleanup(self):
-        self.logger.info("🧹 Cleaning up resources...")
+        self.logger.info("🧹 Cleaning up...")
         self.cap.release()
         if self.phase_socket:
             self.phase_socket.close()
-        if self.classifier_socket:
-            self.classifier_socket.close()
+        self.classifier_socket.close()
         self.context.term()
-        self.logger.info("✅ Cleanup complete.")
+        gc.collect()
+        self.logger.info("✅ Cleanup done.")
 
 if __name__ == "__main__":
-    ingestor = Ingestor()
-    ingestor.run()
+    Ingestor().run()
